@@ -134,12 +134,16 @@ bool PriorityPlanner::plan(const PlannerOptions &options) {
                 attempt_ok = false;
                 break;
             }
+            traj.robot_id = robot_id;
             attempt_solution.push_back(std::move(traj));
             log("Found plan for robot " + std::to_string(robot_id), LogLevel::HLINFO);
         }
 
         if (attempt_ok && static_cast<int>(attempt_solution.size()) == num_robots_)
         {
+            // Planned in priority order; consumers index the solution by robot id.
+            std::sort(attempt_solution.begin(), attempt_solution.end(),
+                      [](const RobotTrajectory &a, const RobotTrajectory &b) { return a.robot_id < b.robot_id; });
             solution_ = std::move(attempt_solution);
             solved = true;
             return true;
@@ -1644,7 +1648,8 @@ void rediscretizeSolution(std::shared_ptr<PlanInstance> instance,
         retime_solution[i].robot_id = i;
     }
 
-    int numSteps = maxtime / new_dt;
+    // Round up so the grid reaches maxtime and every robot's final pose is emitted.
+    int numSteps = static_cast<int>(std::ceil(maxtime / new_dt - 1e-9));
     
     std::vector<int> index(numRobots, 0);
     for (int s = 0; s <= numSteps; s++) {
