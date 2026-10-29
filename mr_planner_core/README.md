@@ -78,6 +78,27 @@ python3 scripts/plugins/generate_vamp_robot_plugin.py \
 
 The generator prints a JSON summary and writes an environment JSON file (e.g. `/tmp/mr_planner_my_robot_plugin/my_robot_env.json`), including convenience fields like `vamp_dimension` and `vamp_n_spheres`.
 
+### Build a plugin for a team of different robots
+
+`VampInstance` takes one robot type per team member, so the members need not share a model (e.g. the same
+arm with two different tools). Pass each generated header once with `--robot STRUCT=HEADER` and the team
+order with `--team`, one struct per robot; the robot count follows from `--team`:
+
+```bash
+python3 scripts/plugins/generate_vamp_robot_plugin.py \
+  --env-name four_arm_cell \
+  --robot nero_gripper=/path/nero_gripper_fk.hh \
+  --robot nero_pika=/path/nero_pika_fk.hh \
+  --team nero_gripper,nero_gripper,nero_pika,nero_pika \
+  --base-transforms /path/four_arm_base_transforms.json \
+  --robot-groups s1_left,s1_right,s2_left,s2_right \
+  --mr-planner-core-prefix /usr/local \
+  --output-dir /tmp/mr_planner_four_arm_plugin
+```
+
+Struct names and header file names must be distinct. For a mixed team the environment JSON lists each
+robot's `vamp_dimension` and `vamp_n_spheres` under `team` instead of one value.
+
 ### Use a plugin environment
 
 Use either a direct JSON path:

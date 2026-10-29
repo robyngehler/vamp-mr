@@ -35,7 +35,31 @@ def snake(name: str) -> str:
 def repeated_template(struct_name: str, count: int) -> str:
     if count <= 0:
         raise ValueError("num_robots must be > 0")
-    return ", ".join([f"vamp::robots::{struct_name}"] * count)
+    return team_template([struct_name] * count)
+
+
+def team_template(structs: List[str]) -> str:
+    """Template arguments of a team, one robot struct per robot in team order."""
+    if not structs:
+        raise ValueError("a team needs at least one robot")
+    return ", ".join(f"vamp::robots::{s}" for s in structs)
+
+
+def parse_robot_specs(specs: List[str]) -> Dict[str, Path]:
+    """`STRUCT=HEADER` pairs -> {struct: header}; each struct names one generated robot header."""
+    out: Dict[str, Path] = {}
+    for spec in specs:
+        struct, sep, header = spec.partition("=")
+        struct = sanitize_cpp_identifier(struct.strip())
+        if not sep or not header.strip():
+            raise ValueError(f"--robot expects STRUCT=HEADER, got {spec!r}")
+        if struct in out:
+            raise ValueError(f"--robot {struct} given twice")
+        path = Path(header.strip()).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        out[struct] = path
+    return out
 
 
 def infer_prefix_from_core_dir(core_dir: str) -> Optional[Path]:
@@ -166,16 +190,32 @@ def write_plugin_sources(
     *,
     out_dir: Path,
     plugin_target: str,
-    robot_struct: str,
-    robot_header: Path,
-    num_robots: int,
+    robot_struct: str = "",
+    robot_header: Optional[Path] = None,
+    num_robots: int = 1,
+    robots: Optional[Dict[str, Path]] = None,
+    team: Optional[List[str]] = None,
 ) -> Path:
+    """Write plugin.cpp and CMakeLists.txt.
+
+    Either one robot type repeated `num_robots` times (`robot_struct`, `robot_header`), or a team of
+    possibly different types: `robots` maps each struct to its header, `team` lists one struct per
+    robot in team order.
+    """
+    if robots is None:
+        robots = {robot_struct: Path(robot_header)}
+        team = [robot_struct] * num_robots
+    if not team or any(s not in robots for s in team):
+        raise ValueError(f"team {team} names a robot without a header ({sorted(robots)})")
+    headers = [robots[s] for s in dict.fromkeys(team)]
+    if len({h.name for h in headers}) != len(headers):
+        raise ValueError("robot headers must have distinct file names")
     src_dir = out_dir / "plugin_src"
     src_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy the header locally so the plugin build is self-contained.
-    local_header = src_dir / robot_header.name
-    shutil.copy2(robot_header, local_header)
+    # Copy the headers locally so the plugin build is self-contained.
+    for header in headers:
+        shutil.copy2(header, src_dir / header.name)
 
     plugin_cpp = src_dir / "plugin.cpp"
     plugin_cpp.write_text(
@@ -183,11 +223,11 @@ def write_plugin_sources(
             [
                 '#include <mr_planner/backends/vamp_plugin_api.h>',
                 '#include <mr_planner/backends/vamp_instance.h>',
-                f'#include "{local_header.name}"',
+                *[f'#include "{h.name}"' for h in headers],
                 "",
                 "#include <new>",
                 "",
-                f"using PluginInstance = VampInstance<{repeated_template(robot_struct, num_robots)}>;",
+                f"using PluginInstance = VampInstance<{team_template(team)}>;",
                 "",
                 "namespace {",
                 "PlanInstance *create_instance() { return new PluginInstance(); }",
@@ -257,6 +297,18 @@ def main() -> int:
 
     parser.add_argument("--robot-struct", default="", help="C++ struct name (defaults to sanitized env-name)")
     parser.add_argument("--robot-header", default="", help="Use an existing VAMP robot header (.hh) instead of running cricket")
+    parser.add_argument(
+        "--robot",
+        action="append",
+        default=[],
+        metavar="STRUCT=HEADER",
+        help="A generated robot header and its struct; repeat for a team of different robot types (with --team)",
+    )
+    parser.add_argument(
+        "--team",
+        default="",
+        help="Comma-separated robot structs in team order, one per robot (requires --robot; sets the robot count)",
+    )
 
     parser.add_argument("--spherized-urdf", default="", help="Path to spherized URDF (required when running cricket)")
     parser.add_argument("--srdf", default="", help="Path to SRDF (required when running cricket)")
@@ -279,11 +331,23 @@ def main() -> int:
 
     environment_name = args.environment_name.strip() or env_name
 
-    num_robots = int(args.num_robots)
-    if num_robots <= 0:
-        raise SystemExit("--num-robots must be > 0")
-
-    robot_struct = sanitize_cpp_identifier(args.robot_struct.strip() or env_name)
+    robots = parse_robot_specs(args.robot) if args.robot else None
+    team: Optional[List[str]] = None
+    if robots is not None:
+        if args.robot_header or args.spherized_urdf:
+            raise SystemExit("--robot takes generated headers; do not combine it with --robot-header or cricket inputs")
+        team = [sanitize_cpp_identifier(x.strip()) for x in args.team.split(",") if x.strip()]
+        if not team:
+            raise SystemExit("--robot needs --team, one struct per robot in team order")
+        num_robots = len(team)
+        robot_struct = sanitize_cpp_identifier(env_name)
+    else:
+        if args.team:
+            raise SystemExit("--team requires --robot")
+        num_robots = int(args.num_robots)
+        if num_robots <= 0:
+            raise SystemExit("--num-robots must be > 0")
+        robot_struct = sanitize_cpp_identifier(args.robot_struct.strip() or env_name)
     plugin_target = f"mr_planner_vamp_plugin_{snake(robot_struct)}_{num_robots}r"
 
     out_dir = Path(args.output_dir) if args.output_dir else Path("/tmp") / f"mr_planner_plugin_{snake(robot_struct)}"
@@ -298,7 +362,9 @@ def main() -> int:
 
     # Step 1: Generate robot header via cricket (optional).
     header_path: Path
-    if args.robot_header:
+    if robots is not None:
+        header_path = robots[team[0]]
+    elif args.robot_header:
         header_path = Path(args.robot_header).resolve()
         if not header_path.is_file():
             raise FileNotFoundError(header_path)
@@ -335,13 +401,10 @@ def main() -> int:
             raise RuntimeError(f"cricket did not produce header at {header_path}")
 
     # Step 2: Write plugin sources and build.
-    src_dir = write_plugin_sources(
-        out_dir=out_dir,
-        plugin_target=plugin_target,
-        robot_struct=robot_struct,
-        robot_header=header_path,
-        num_robots=num_robots,
-    )
+    if robots is None:
+        robots = {robot_struct: header_path}
+        team = [robot_struct] * num_robots
+    src_dir = write_plugin_sources(out_dir=out_dir, plugin_target=plugin_target, robots=robots, team=team)
     build_dir = out_dir / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
 
@@ -365,7 +428,11 @@ def main() -> int:
     plugin_lib = candidates[0].resolve()
 
     # Step 3: Write environment JSON that mr_planner_core can load.
-    header_meta = parse_robot_header_metadata(header_path)
+    team_meta = [dict(robot_struct=s, **parse_robot_header_metadata(robots[s])) for s in team]
+    header_meta = {k: v for k, v in team_meta[0].items() if k != "robot_struct"}
+    if any({k: v for k, v in m.items() if k != "robot_struct"} != header_meta for m in team_meta):
+        # A mixed team has no single dimension or sphere count; each robot's is listed in `team`.
+        header_meta = {"team": team_meta}
     robot_groups: List[str]
     if args.robot_groups:
         robot_groups = [x.strip() for x in args.robot_groups.split(",") if x.strip()]
