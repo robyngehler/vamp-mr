@@ -1182,6 +1182,50 @@ public:
         return instance_->checkCollision({pose}, self_only);
     }
 
+    bool in_collision_subset(const std::vector<int> &robot_ids,
+                             const std::vector<std::vector<double>> &joint_positions,
+                             bool self_only)
+    {
+        if (robot_ids.empty() || robot_ids.size() != joint_positions.size())
+        {
+            throw std::runtime_error("robot_ids and joint_positions must be non-empty and of equal length");
+        }
+        std::vector<RobotPose> poses;
+        poses.reserve(robot_ids.size());
+        for (std::size_t k = 0; k < robot_ids.size(); ++k)
+        {
+            RobotPose pose = instance_->initRobotPose(robot_ids[k]);
+            pose.joint_values = joint_positions[k];
+            poses.push_back(std::move(pose));
+        }
+        return instance_->checkCollision(poses, self_only);
+    }
+
+    // Collision of robot_a at every row of path_a against robot_b at every row of path_b; row-major.
+    std::vector<std::vector<bool>> pair_collision_matrix(int robot_a,
+                                                         const std::vector<std::vector<double>> &path_a,
+                                                         int robot_b,
+                                                         const std::vector<std::vector<double>> &path_b,
+                                                         bool self_only)
+    {
+        if (robot_a == robot_b)
+        {
+            throw std::runtime_error("pair_collision_matrix needs two different robots");
+        }
+        std::vector<std::vector<bool>> out(path_a.size(), std::vector<bool>(path_b.size(), false));
+        std::vector<RobotPose> poses{instance_->initRobotPose(robot_a), instance_->initRobotPose(robot_b)};
+        for (std::size_t i = 0; i < path_a.size(); ++i)
+        {
+            poses[0].joint_values = path_a[i];
+            for (std::size_t j = 0; j < path_b.size(); ++j)
+            {
+                poses[1].joint_values = path_b[j];
+                out[i][j] = instance_->checkCollision(poses, self_only);
+            }
+        }
+        return out;
+    }
+
     bool motion_in_collision(const std::vector<std::vector<double>> &start,
                              const std::vector<std::vector<double>> &goal,
                              double step_size,
@@ -3290,6 +3334,18 @@ PYBIND11_MODULE(_mr_planner_core, m)
              py::arg("robot_id"),
              py::arg("joint_positions"),
              py::arg("self_only") = false)
+        .def("in_collision_subset",
+             &VampEnvironment::in_collision_subset,
+             py::arg("robot_ids"),
+             py::arg("joint_positions"),
+             py::arg("self_only") = false)
+        .def("pair_collision_matrix",
+             &VampEnvironment::pair_collision_matrix,
+             py::arg("robot_a"),
+             py::arg("path_a"),
+             py::arg("robot_b"),
+             py::arg("path_b"),
+             py::arg("self_only") = true)
         .def("motion_in_collision",
              &VampEnvironment::motion_in_collision,
              py::arg("start"),
