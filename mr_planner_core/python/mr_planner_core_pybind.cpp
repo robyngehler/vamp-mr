@@ -1764,6 +1764,11 @@ public:
             instance_->setGoalPose(i, goal[static_cast<std::size_t>(i)]);
         }
 
+        // Search, shortcut and file output touch no Python object: release the GIL so the
+        // caller's other threads keep running while this environment plans.
+        std::optional<py::gil_scoped_release> released;
+        released.emplace();
+
         const bool need_output_dir = write_files || write_tpg;
         const std::string resolved_output_dir =
             need_output_dir ? (output_dir.empty() ? make_temp_dir("mr_planner_py_plan") : output_dir) : std::string();
@@ -1948,6 +1953,7 @@ public:
             }
         }
 
+        released.reset();
         py::dict out;
         out["output_dir"] = resolved_output_dir;
         out["start"] = start;
