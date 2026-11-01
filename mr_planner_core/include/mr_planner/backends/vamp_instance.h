@@ -3322,6 +3322,42 @@ void VampInstance<RobotTs...>::rebuildEnvironment()
     bumpEnvironmentVersion();
 }
 
+namespace detail
+{
+    // A box needs finite positive extents, a cylinder a finite positive radius and length (its
+    // collision test divides by the squared axis length); both need a finite pose and a
+    // non-degenerate orientation.
+    inline void validateObjectGeometry(const Object &obj)
+    {
+        const auto finite = [](double v) { return std::isfinite(v); };
+        if (!finite(obj.x) || !finite(obj.y) || !finite(obj.z))
+        {
+            throw std::invalid_argument("VampInstance: object '" + obj.name + "' has a non-finite position");
+        }
+        const double qn = obj.qx * obj.qx + obj.qy * obj.qy + obj.qz * obj.qz + obj.qw * obj.qw;
+        if (!finite(qn) || qn < 1e-12)
+        {
+            throw std::invalid_argument("VampInstance: object '" + obj.name + "' has no valid orientation");
+        }
+        if (obj.shape == Object::Shape::Box)
+        {
+            if (!(obj.length > 0.0 && obj.width > 0.0 && obj.height > 0.0) || !finite(obj.length) ||
+                !finite(obj.width) || !finite(obj.height))
+            {
+                throw std::invalid_argument("VampInstance: box '" + obj.name + "' needs positive finite extents");
+            }
+        }
+        else if (obj.shape == Object::Shape::Cylinder)
+        {
+            if (!(obj.radius > 0.0 && obj.length > 0.0) || !finite(obj.radius) || !finite(obj.length))
+            {
+                throw std::invalid_argument("VampInstance: cylinder '" + obj.name +
+                                            "' needs a positive finite radius and length");
+            }
+        }
+    }
+}  // namespace detail
+
 template <typename... RobotTs>
 void VampInstance<RobotTs...>::addMoveableObject(const Object &obj)
 {
@@ -3334,6 +3370,7 @@ void VampInstance<RobotTs...>::addMoveableObject(const Object &obj)
     {
         throw std::invalid_argument("VampInstance: unsupported object shape");
     }
+    detail::validateObjectGeometry(obj);
 
     {
         std::lock_guard<std::mutex> lock(objects_mutex_);
@@ -3376,6 +3413,7 @@ void VampInstance<RobotTs...>::moveObject(const Object &obj)
     {
         throw std::invalid_argument("VampInstance: unsupported object shape");
     }
+    detail::validateObjectGeometry(obj);
 
     {
         std::lock_guard<std::mutex> lock(objects_mutex_);
@@ -3752,6 +3790,7 @@ template <typename... RobotTs>
 void VampInstance<RobotTs...>::detachObjectFromRobot(const std::string &name, const RobotPose &pose)
 {
     int robot_id = -1;
+    bool filter_updated = false;
     {
         std::lock_guard<std::mutex> lock(objects_mutex_);
         auto it = objects_.find(name);
@@ -3800,11 +3839,18 @@ void VampInstance<RobotTs...>::detachObjectFromRobot(const std::string &name, co
         if (robot_id >= 0 && robot_id < static_cast<int>(kRobotCount))
         {
             attachments_[static_cast<std::size_t>(robot_id)].reset();
-            attachment_collision_overrides_[static_cast<std::size_t>(robot_id)].erase(name);
+            // The set holds what this robot's attachment may touch; it ends with the attachment.
+            auto &allowed = attachment_collision_overrides_[static_cast<std::size_t>(robot_id)];
+            filter_updated = !allowed.empty();
+            allowed.clear();
         }
 
         movable_objects_.insert(name);
         meshcat_dirty_objects_.insert(name);
+    }
+    if (filter_updated)
+    {
+        rebuildCollisionFilter();
     }
     rebuildEnvironment();
     if (visualization_instance_)
